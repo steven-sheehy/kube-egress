@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-egress
+  labels:
+    app: kube-egress
+spec:
+  selector:
+    matchLabels:
+      app: kube-egress
+  updateStrategy:
+    rollingUpdate:
+      maxUnavailable: 100%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: kube-egress
+    spec:
+      hostNetwork: true
+      terminationGracePeriodSeconds: 10
+      containers:
+      - name: egress
+        image: ssheehy/kube-egress:0.1.0
+        resources:
+          limits:
+            cpu: 0.05
+            memory: 20Mi
+        args:
+        - --update-interval=5
+        - --vip=10.0.0.2
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - mountPath: /etc/iproute2/rt_tables.d/
+          name: routing-tables
+          readOnly: false
+        - mountPath: /run/xtables.lock
+          name: xtables-lock
+          readOnly: false
+      volumes:
+      - name: routing-tables
+        hostPath:
+          path: /etc/iproute2/rt_tables.d/
+          type: DirectoryOrCreate
+      - name: xtables-lock
+        hostPath:
+          path: /run/xtables.lock
+          type: FileOrCreate
+
