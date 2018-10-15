@@ -85,6 +85,8 @@ function delete() {
 }
 
 function apply() {
+  VIP_EXISTS=false
+
   if (ip -o addr show "${INTERFACE}" | grep -Fq "${VIP}/32"); then
     VIP_EXISTS=true
   fi
