@@ -39,3 +39,10 @@ kubectl apply -f daemonset.yaml
 - No ability to restrict by namespace
 - IP must already be routable to the nodes and appear as a virtual IP on exactly one of the nodes
 
+## Build
+
+```shell
+docker build --pull -t ssheehy/kube-egress:latest .
+docker push ssheehy/kube-egress
+```
+
