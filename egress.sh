@@ -34,7 +34,7 @@ Usage:
   $NAME [options]
 
 Options:
-  -d, --delete               Deletes all iptables and routing rules associated with the egress
+  -d, --delete               Deletes all iptables and routing rules associated with the egress and exit
   -h, --help                 Displays the help text
   -i, --interface            The network interface to use. Default is ${INTERFACE}
   -p, --pod-subnet           The Kubernetes pod IP allocation range. Default is ${POD_SUBNET}
@@ -45,8 +45,14 @@ Options:
 EOF
 }
 
+function log() {
+  local message="${1}"
+  local timestamp=$(date -Iseconds)
+  echo "${timestamp} ${message}"
+}
+
 function add_iptables() {
-  echo "Adding iptables rules"
+  log "Adding iptables rules"
   iptables -t mangle -N EGRESS
   iptables -t mangle -A EGRESS -d "${POD_SUBNET}" -j RETURN
   iptables -t mangle -A EGRESS -d "${SERVICE_SUBNET}" -j RETURN
@@ -55,13 +61,13 @@ function add_iptables() {
 }
 
 function add_egress() {
-  echo "Adding iptables rules for egress"
+  log "Adding iptables rules for egress"
   iptables -t mangle -A FORWARD -i "${INTERFACE}" -o "${INTERFACE}" -j MARK --set-mark "${ROUTE_ID}/${ROUTE_ID}"
-  iptables -t nat -I POSTROUTING -o "${INTERFACE}" -m mark --mark "${ROUTE_ID}" -j SNAT --to "${VIP}"
+  iptables -t nat -I POSTROUTING -o "${INTERFACE}" -m mark --mark "${ROUTE_ID}/${ROUTE_ID}" -j SNAT --to "${VIP}"
 }
 
 function add_routes() {
-  echo "Adding routing rules"
+  log "Adding routing rules"
   echo "${ROUTE_ID} ${ROUTE_TABLE}" > "/etc/iproute2/rt_tables.d/${ROUTE_TABLE}.conf"
   ip route add default via "${VIP}" dev "${INTERFACE}" table "${ROUTE_TABLE}"
   ip rule add fwmark "${ROUTE_ID}" table "${ROUTE_TABLE}"
@@ -69,14 +75,14 @@ function add_routes() {
 }
 
 function delete() {
-  echo "Deleting iptables rules"
+  log "Deleting iptables rules"
   iptables -t mangle -D PREROUTING -j EGRESS 2>/dev/null || true
   iptables -t mangle -D FORWARD -i "${INTERFACE}" -o "${INTERFACE}" -j MARK --set-mark "${ROUTE_ID}/${ROUTE_ID}" 2>/dev/null || true
   iptables -t mangle -F EGRESS 2>/dev/null || true
   iptables -t mangle -X EGRESS 2>/dev/null || true
-  iptables -t nat -D POSTROUTING -o "${INTERFACE}" -m mark --mark "${ROUTE_ID}" -j SNAT --to "${VIP}" 2>/dev/null || true
+  iptables -t nat -D POSTROUTING -o "${INTERFACE}" -m mark --mark "${ROUTE_ID}/${ROUTE_ID}" -j SNAT --to "${VIP}" 2>/dev/null || true
 
-  echo "Deleting routing rules"
+  log "Deleting routing rules"
   ip rule del table "${ROUTE_TABLE}" 2>/dev/null || true
   ip route flush table "${ROUTE_TABLE}" 2>/dev/null || true
   ip route flush cache
@@ -92,21 +98,21 @@ function apply() {
   fi
 
   if [[ "${VIP_EXISTS}" == true && "${EGRESS}" != true ]]; then
-    echo "VIP ${VIP} transitioned to primary"
+    log "VIP ${VIP} transitioned to primary"
     delete
     add_iptables
     add_egress
     EGRESS=true
-    echo "Egress now enabled on node ${HOSTNAME}"
+    log "Egress now enabled on node ${HOSTNAME}"
   fi
 
   if [[ "${VIP_EXISTS}" == false && "${EGRESS}" != false ]]; then
-    echo "VIP ${VIP} transitioned to secondary"
+    log "VIP ${VIP} transitioned to secondary"
     delete
     add_routes
     add_iptables
     EGRESS=false
-    echo "Egress now disabled on node ${HOSTNAME}"
+    log "Egress now disabled on node ${HOSTNAME}"
   fi
 }
 
@@ -122,23 +128,23 @@ do
       exit 0
       ;;
     -i | --interface)
-      INTERFACE="$2"
+      INTERFACE="${2:-$INTERFACE}"
       shift 2
       ;;
     -p | --pod-subnet)
-      POD_SUBNET="$2"
+      POD_SUBNET="${2:-$POD_SUBNET}"
       shift 2
       ;;
     -r | --route-id)
-      ROUTE_ID="$2"
+      ROUTE_ID="${2:-$ROUTE_ID}"
       shift 2
       ;;
     -s | --service-subnet)
-      SERVICE_SUBNET="$2"
+      SERVICE_SUBNET="${2:-$SERVICE_SUBNET}"
       shift 2
       ;;
     -u | --update-interval)
-      UPDATE_INTERVAL="$2"
+      UPDATE_INTERVAL="${2:-$UPDATE_INTERVAL}"
       shift 2
       ;;
     -v | --vip)
@@ -153,7 +159,7 @@ do
 done
 
 if [[ -z "${VIP}" ]]; then
-  echo "Missing required --vip argument" >&2
+  log "Missing required --vip argument"
   help
   exit 1
 fi
