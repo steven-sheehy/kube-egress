@@ -17,7 +17,7 @@ build:
   image: docker:stable
   script:
   - docker build --pull -t $CI_REGISTRY_IMAGE:latest .
-  - docker push $IMAGE
+  - docker push $CI_REGISTRY_IMAGE
   services:
   - docker:dind
   stage: build
