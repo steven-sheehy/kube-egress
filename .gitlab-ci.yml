@@ -7,7 +7,6 @@ variables:
   DOCKER_HOST: "tcp://docker:2375"
   GIT_STRATEGY: fetch
   GET_SOURCES_ATTEMPTS: "3"
-  IMAGE: $CI_REGISTRY_IMAGE/$CI_PROJECT_NAME
 
 before_script:
   - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
@@ -17,7 +16,7 @@ build:
   - tags
   image: docker:stable
   script:
-  - docker build --pull -t $IMAGE:latest .
+  - docker build --pull -t $CI_REGISTRY_IMAGE:latest .
   - docker push $IMAGE
   services:
   - docker:dind
@@ -28,8 +27,8 @@ release:
   only:
   - tags
   script:
-  - docker build --pull -t $IMAGE:latest -t $IMAGE:$CI_COMMIT_TAG .
-  - docker push $IMAGE
+  - docker build --pull -t $CI_REGISTRY_IMAGE:latest -t $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG .
+  - docker push $CI_REGISTRY_IMAGE
   services:
   - docker:dind
   stage: release
