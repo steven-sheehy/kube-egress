@@ -21,7 +21,7 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
       - name: egress
-        image: ssheehy/kube-egress:0.2.1
+        image: ssheehy/kube-egress:0.3.0
         resources:
           limits:
             cpu: 0.05
