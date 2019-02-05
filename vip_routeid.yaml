@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vip-routeid-mappings
+  namespace: default
+data:
+  192.168.122.222: "64"
+  192.168.122.223: "65"

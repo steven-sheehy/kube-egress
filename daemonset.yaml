@@ -21,14 +21,18 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
       - name: egress
-        image: ssheehy/kube-egress:0.3.0
+        image: ssheehy/kube-egress:0.3.1
         resources:
           limits:
             cpu: 0.05
             memory: 20Mi
         args:
+        - --pod-subnet=10.244.0.0/16
+        - --service-subnet=10.96.0.0/12
+        - --interface=eth0
         - --update-interval=5
-        - --vip=10.0.0.2
+        - --vip-routeid-mappings=/etc/vip-routeid-mappings
+        - --podip-vip-mappings=/etc/podip-vip-mappings
         securityContext:
           privileged: true
         volumeMounts:
@@ -38,6 +42,10 @@ spec:
         - mountPath: /run/xtables.lock
           name: xtables-lock
           readOnly: false
+        - mountPath: /etc/vip-routeid-mappings
+          name: vip-routeid-mappings
+        - mountPath: /etc/podip-vip-mappings
+          name: podip-vip-mappings
       volumes:
       - name: routing-tables
         hostPath:
@@ -47,4 +55,9 @@ spec:
         hostPath:
           path: /run/xtables.lock
           type: FileOrCreate
-
+      - name: vip-routeid-mappings
+        configMap:
+          name: vip-routeid-mappings
+      - name: podip-vip-mappings
+        configMap:
+          name: podip-vip-mappings
