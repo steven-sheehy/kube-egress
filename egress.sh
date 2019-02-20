@@ -114,6 +114,8 @@ function apply() {
   handle_rule -t mangle -A EGRESS -d "${POD_SUBNET}" -j RETURN
   handle_rule -t mangle -A EGRESS -d "${SERVICE_SUBNET}" -j RETURN
   handle_rule -t mangle -A PREROUTING -j EGRESS
+  handle_chain -t nat -N EGRESS_POST
+  handle_rule -t nat -I POSTROUTING -j EGRESS_POST
 
   unset configured_vips
   declare -A configured_vips
@@ -122,40 +124,59 @@ function apply() {
     VIP="${PODIP_VIP_MAPPINGS[$POD_IP]}"
     ROUTE_ID="${VIP_ROUTEID_MAPPINGS[$VIP]}"
     ROUTE_TABLE="${ROUTE_TABLE_PREFIX}_${ROUTE_ID}"
+    EGRESS_FWD_CHAIN="EGRESS_FWD_${VIP}"
+    EGRESS_POST_CHAIN="EGRESS_POST_${VIP}"
+    VIP_CONFIGURED=false
 
+    # Add common per pod rules
     handle_rule -t mangle -A EGRESS -s "${POD_IP}" -j MARK --set-mark "${ROUTE_ID}"
 
+    # Check if VIP has already been configured in this loop
+    if [[ -z "${configured_vips[$VIP]+unset}" ]]; then
+      # Define and add chains for VIP
+      handle_chain -t mangle -N "${EGRESS_FWD_CHAIN}"
+      handle_rule -t mangle -A FORWARD -j "${EGRESS_FWD_CHAIN}"
+      handle_chain -t nat -N "${EGRESS_POST_CHAIN}"
+      handle_rule -t nat -I EGRESS_POST -j "${EGRESS_POST_CHAIN}"
+      configured_vips["${VIP}"]=true
+    else
+      VIP_CONFIGURED=true
+    fi
+
+    # Egress nodes
     if (ip -o addr show "${INTERFACE}" | grep -Fq "${VIP}"); then
       log "VIP ${VIP} for ${POD_IP} transitioned to primary"
-	  # Add rules for primary
-      handle_rule -t mangle -A FORWARD -s "${POD_IP}" -i "${INTERFACE}" -o "${INTERFACE}" -j MARK --set-mark "${ROUTE_ID}"
-      handle_rule -t nat -I POSTROUTING -o "${INTERFACE}" -m mark --mark "${ROUTE_ID}/${ROUTE_ID_MASK}" -j SNAT --to "${VIP}"
-	  # Delete rules for secondory
-      if [[ -z "${configured_vips[$VIP]+unset}" ]]; then
-        log "VIP ${VIP} transitioned to secondary"
-        handle_rule -t nat -D POSTROUTING -m mark --mark "${ROUTE_ID}/${ROUTE_ID_MASK}" -j RETURN
+      # Per VIP rules
+      if [ "${VIP_CONFIGURED}" == "false" ]; then
+        # Delete rules for secondory
+        handle_rule -t nat -D EGRESS_POST -m mark --mark "${ROUTE_ID}/${ROUTE_ID_MASK}" -j ACCEPT
         ip rule del table "${ROUTE_TABLE}" 2>/dev/null || true
         ip route flush table "${ROUTE_TABLE}" 2>/dev/null || true
         rm -f "/etc/iproute2/rt_tables.d/${ROUTE_TABLE}.conf"
-        configured_vips["${VIP}"]=true
       fi
+      # Per pod rules
+      # Add rules for primary
+      handle_rule -t mangle -A "${EGRESS_FWD_CHAIN}" -s "${POD_IP}" -i "${INTERFACE}" -o "${INTERFACE}" -j MARK --set-mark "${ROUTE_ID}"
+      handle_rule -t nat -A "${EGRESS_POST_CHAIN}" -o "${INTERFACE}" -m mark --mark "${ROUTE_ID}/${ROUTE_ID_MASK}" -j SNAT --to "${VIP}"
+    # Non-egress nodes
     else
-	  # Add rules for secondary
-      if [[ -z "${configured_vips[$VIP]+unset}" ]]; then
+      # Per VIP rules
+      if [ "${VIP_CONFIGURED}" == "false" ]; then
+        # Add rules for secondary
         log "VIP ${VIP} transitioned to secondary"
-        handle_rule -t nat -I POSTROUTING -m mark --mark "${ROUTE_ID}/${ROUTE_ID_MASK}" -j RETURN
+        handle_rule -t nat -A EGRESS_POST -m mark --mark "${ROUTE_ID}/${ROUTE_ID_MASK}" -j ACCEPT
         echo "${ROUTE_ID} ${ROUTE_TABLE}" > "/etc/iproute2/rt_tables.d/${ROUTE_TABLE}.conf"
-		if ! (ip route show table ${ROUTE_ID} | grep -Fq "${VIP}"); then
+        if ! (ip route show table ${ROUTE_ID} | grep -Fq "${VIP}"); then
           ip route add default via "${VIP}" dev "${INTERFACE}" table "${ROUTE_TABLE}"
-		fi
-		if ! (ip rule show | grep -Fq "${ROUTE_TABLE}"); then
+        fi
+        if ! (ip rule show | grep -Fq "${ROUTE_TABLE}"); then
           ip rule add fwmark "${ROUTE_ID}" table "${ROUTE_TABLE}"
-		fi
-        configured_vips["${VIP}"]=true
+        fi
       fi
-	  # Delete rules for primary
-      handle_rule -t mangle -D FORWARD -s "${POD_IP}" -i "${INTERFACE}" -o "${INTERFACE}" -j MARK --set-mark "${ROUTE_ID}"
-      handle_rule -t nat -D POSTROUTING -o "${INTERFACE}" -m mark --mark "${ROUTE_ID}/${ROUTE_ID_MASK}" -j SNAT --to "${VIP}"
+      # Per pod rules
+      # Delete rules for primary
+      handle_rule -t mangle -D "${EGRESS_FWD_CHAIN}" -s "${POD_IP}" -i "${INTERFACE}" -o "${INTERFACE}" -j MARK --set-mark "${ROUTE_ID}"
+      handle_rule -t nat -D "${EGRESS_POST_CHAIN}" -o "${INTERFACE}" -m mark --mark "${ROUTE_ID}/${ROUTE_ID_MASK}" -j SNAT --to "${VIP}"
     fi
   done
 
@@ -169,28 +190,35 @@ function delete() {
   declare -A VIP_ROUTEID_MAPPINGS
   reload_mappings
 
-  for POD_IP in "${!PODIP_VIP_MAPPINGS[@]}"; do
-    VIP="${PODIP_VIP_MAPPINGS[$POD_IP]}"
+  log "Deleting per Vip rules"
+  for VIP in "${!VIP_ROUTEID_MAPPINGS[@]}"; do
     ROUTE_ID="${VIP_ROUTEID_MAPPINGS[$VIP]}"
     ROUTE_TABLE="${ROUTE_TABLE_PREFIX}_${ROUTE_ID}"
+    EGRESS_FWD_CHAIN="EGRESS_FWD_${VIP}"
+    EGRESS_POST_CHAIN="EGRESS_POST_${VIP}"
 
-    log "Deleting rule for VIP ${VIP} for ${POD_IP}"
-    handle_rule -t mangle -D EGRESS -s "${POD_IP}" -j MARK --set-mark "${ROUTE_ID}"
-    handle_rule -t mangle -D FORWARD -s "${POD_IP}" -i "${INTERFACE}" -o "${INTERFACE}" -j MARK --set-mark "${ROUTE_ID}"
-    handle_rule -t nat -D POSTROUTING -o "${INTERFACE}" -m mark --mark "${ROUTE_ID}/${ROUTE_ID_MASK}" -j SNAT --to "${VIP}"
+    log "Deleting rule for VIP ${VIP}"
+    handle_rule -t mangle -D FORWARD -j "${EGRESS_FWD_CHAIN}"
+    handle_chain -t mangle -F "${EGRESS_FWD_CHAIN}"
+    handle_chain -t mangle -X "${EGRESS_FWD_CHAIN}"
+
+    handle_rule -t nat -D EGRESS_POST -j "${EGRESS_POST_CHAIN}"
+    handle_chain -t nat -F "${EGRESS_POST_CHAIN}"
+    handle_chain -t nat -X "${EGRESS_POST_CHAIN}"
 
     ip rule del table "${ROUTE_TABLE}" 2>/dev/null || true
     ip route flush table "${ROUTE_TABLE}" 2>/dev/null || true
     rm -f "/etc/iproute2/rt_tables.d/${ROUTE_TABLE}.conf"
-    handle_rule -t nat -D POSTROUTING -m mark --mark "${ROUTE_ID}/${ROUTE_ID_MASK}" -j RETURN
+    handle_rule -t nat -D POSTROUTING -m mark --mark "${ROUTE_ID}/${ROUTE_ID_MASK}" -j ACCEPT
   done
 
   ip route flush cache
 
-  log "Deleting common iptables rules"
+  log "Deleting common rules"
+  handle_rule -t nat -D POSTROUTING -j EGRESS_POST
+  handle_chain -t nat -F EGRESS_POST
+  handle_chain -t nat -X EGRESS_POST
   handle_rule -t mangle -D PREROUTING -j EGRESS
-  handle_rule -t mangle -D EGRESS -d "${POD_SUBNET}" -j RETURN
-  handle_rule -t mangle -D EGRESS -d "${SERVICE_SUBNET}" -j RETURN
   handle_chain -t mangle -F EGRESS
   handle_chain -t mangle -X EGRESS
 }
