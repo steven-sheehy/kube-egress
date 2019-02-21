@@ -134,6 +134,13 @@ function destroy_delete_chain() {
   handle_chain -t "${table}" -X "${child_chain}"
 }
 
+function delete_rule() {
+  local table=${1}
+  shift
+  # Remove the duplicated rule by replacing the output of iptables -S
+  eval $(echo $* | sed "s/^-A/iptables -t ${table} -D/") 2>/dev/null || true
+}
+
 function apply() {
   unset PODIP_VIP_MAPPINGS
   unset VIP_ROUTEID_MAPPINGS
@@ -223,8 +230,8 @@ function delete_duplicated() {
     while read rule;do
       if [ "${rule}" != "" ];then
         if [ "${filter}" = "*" ] || (echo "${rule}" | grep -Fq "${filter}");then
-          # Remove the duplicated rule by replacing the output of iptables -S
-          eval $(echo "${rule}" | sed "s/^-A/iptables -t ${table} -D/") 2>/dev/null || true
+          echo "duplicated"
+          delete_rule "${table}" ${rule}
           count=$((${count} + 1))
         fi
       fi
@@ -255,6 +262,156 @@ function delete_all_duplicated() {
   iptables -t nat -nL EGRESS_POST 2>/dev/null | awk '/EGRESS_POST_/{print $1}' \
   | while read chain;do
     delete_duplicated nat "${chain}" "*"
+  done
+}
+
+function get_ip_without_netmask() {
+  local ip=${1}
+  echo "${ip}" | awk -F '/' '{print $1}'
+}
+
+function get_decimal_routeid_without_mask() {
+  local mark=${1}
+  printf "%d" $(echo "${mark}" | awk -F '/' '{print $1}')
+}
+
+function is_vip_routeid_mapping_correct() {
+  local VIP=${1}
+  local EXPECTED_ROUTEID=${2}
+  local ret=false
+
+  # Check if route_id for vip that is mapped with podip is correct
+  if [[ -n "${VIP_ROUTEID_MAPPINGS[$VIP]+unset}" ]];then
+    local ROUTEID_IN_MAPPINGS="${VIP_ROUTEID_MAPPINGS[$VIP]}"
+    if [ "${EXPECTED_ROUTEID}" == "${ROUTEID_IN_MAPPINGS}" ];then
+      ret=true
+    fi
+  fi
+  echo ${ret}
+}
+
+function is_pod_ip_routeid_mapping_correct() {
+  local POD_IP=${1}
+  local ROUTEID=${2}
+  local ret=false
+
+  # Check if POD_IP is defined in PODIP_VIP_MAPPINGS
+  if [[ -n "${PODIP_VIP_MAPPINGS[$POD_IP]+unset}" ]];then
+    local VIP="${PODIP_VIP_MAPPINGS[$POD_IP]}"
+    if (is_vip_routeid_mapping_correct "${VIP}" "${ROUTEID}" | grep -Fq 'true');then
+      ret=true
+    fi
+  fi
+  echo ${ret}
+}
+
+function is_routeid_exist() {
+  local EXPECTED_ROUTEID=${1}
+  local ret=false
+
+  for VIP in "${!VIP_ROUTEID_MAPPINGS[@]}"; do
+    ROUTEID_IN_MAPPINGS="${VIP_ROUTEID_MAPPINGS[$VIP]}"
+    if [ "${EXPECTED_ROUTEID}" == "${ROUTEID_IN_MAPPINGS}" ];then
+      ret=true
+    fi
+  done
+
+  echo ${ret}
+}
+
+function delete_obsolete() {
+  unset PODIP_VIP_MAPPINGS
+  unset VIP_ROUTEID_MAPPINGS
+  declare -A PODIP_VIP_MAPPINGS
+  declare -A VIP_ROUTEID_MAPPINGS
+  reload_mappings
+
+  # Check EGRESS chain
+  iptables -t mangle -S EGRESS | grep -F -- '-A EGRESS -s' \
+  | while read rule;do
+    # ex) rule is like below:
+    # -A EGRESS -s 10.244.1.1/32 -j MARK --set-xmark 0x40/0xffffffff
+    local POD_IP=$(get_ip_without_netmask $(echo "${rule}" | awk '{print $4}'))
+    local ROUTEID=$(get_decimal_routeid_without_mask $(echo "${rule}" | awk '{print $8}'))
+
+    # Check if route_id for vip that is mapped with podip is correct
+    if ( is_pod_ip_routeid_mapping_correct "${POD_IP}" "${ROUTEID}" | grep -Fq 'false' );then
+      delete_rule mangle ${rule}
+    fi
+  done
+
+  # Check FORWARD chain
+  iptables -t mangle -S FORWARD 2>/dev/null | grep -F -- '-A FORWARD -j' \
+  | while read rule;do
+    # ex) rule is like below:
+    # -A FORWARD -j EGRESS_FWD_192.168.1.1
+    local CHAIN=$(echo "${rule}" | awk '{print $4}')
+    local VIP=$(echo "${CHAIN}" | awk -F '_' '{print $3}')
+    if [[ -z "${VIP_ROUTEID_MAPPINGS[$VIP]+unset}" ]]; then
+      # This VIP is not defined, so chain for this VIP is no longer needed.
+      # Delete obsolete chain
+      destroy_delete_chain mangle FORWARD "${CHAIN}"
+      continue
+    fi
+
+    # Check EGRESS_FWD_* chains
+    iptables -t mangle -S ${CHAIN} 2>/dev/null | grep -F -- '-A EGRESS_FWD_' \
+    | while read rule;do
+      # ex) rule is like below:
+      # -A EGRESS_FWD_192.168.1.1 -s 10.244.1.1/32 -i eth0 -o eth0 -j MARK --set-xmark 0x40/0xffffffff
+      local POD_IP=$(get_ip_without_netmask $(echo "${rule}" | awk '{print $4}'))
+      local ROUTEID=$(get_decimal_routeid_without_mask $(echo "${rule}" | awk '{print $12}'))
+
+      # Check if route_id for vip that is mapped with podip is correct
+      if ( is_pod_ip_routeid_mapping_correct "${POD_IP}" "${ROUTEID}" | grep -Fq 'false' );then
+        # Delete obsolete rule
+        delete_rule mangle ${rule}
+      fi
+    done
+  done
+
+  # Check EGRESS_POST chain
+  iptables -t nat -S EGRESS_POST 2>/dev/null | grep -F -- '-A EGRESS_POST' \
+  | while read rule;do
+    # ex) rules are like belows:
+    #  (1)
+    #     -A EGRESS_POST -j EGRESS_POST_192.168.1.1
+    #  (2)
+    #     -A EGRESS_POST -m mark --mark 0x40/0xff -j ACCEPT
+
+    # Case (1)
+    if ( echo "${rule}" | grep -Fq -- '-A EGRESS_POST -j' );then
+      local CHAIN=$(echo "${rule}" | awk '{print $4}')
+      local VIP=$(echo "${CHAIN}" | awk -F '_' '{print $3}')
+      if [[ -z "${VIP_ROUTEID_MAPPINGS[$VIP]+unset}" ]];then
+        # This VIP is not defined, so chain for this VIP is no longer needed.
+        destroy_delete_chain nat EGRESS_POST "${CHAIN}"
+        continue
+      fi
+
+      # Check EGRESS_POST_* chains
+      iptables -t nat -S ${CHAIN} 2>/dev/null | grep -F -- '-A EGRESS_POST_' \
+      | while read rule;do
+        # ex) rule is like below:
+        # -A EGRESS_POST_192.168.1.1 -o eth0 -m mark --mark 0x40/0xff -j SNAT --to-source 192.168.1.1
+        local VIP=$(echo "${rule}" | awk '{print $12}')
+        local ROUTEID=$(get_decimal_routeid_without_mask $(echo "${rule}" | awk '{print $8}'))
+
+        # Check if vip and routeid are mapped correctly
+        if ( is_vip_routeid_mapping_correct "${VIP}" "${ROUTEID}" | grep -Fq 'false' ) ;then
+          delete_rule nat ${rule}
+        fi
+      done
+
+    # Case (2)
+    elif ( echo "${rule}" | grep -Fq -- '-A EGRESS_POST -m mark --mark' );then
+      local ROUTEID=$(get_decimal_routeid_without_mask $(echo "${rule}" | awk '{print $6}'))
+      # Check if vip and routeid are mapped correctly
+      if ( is_routeid_exist "${ROUTEID}" | grep -Fq 'false' ) ;then
+        # Delete obsolete rule
+        delete_rule nat ${rule}
+      fi
+    fi
   done
 }
 
@@ -346,6 +503,7 @@ fi
 
 while :; do
   delete_all_duplicated
+  delete_obsolete
   apply
 
   if [[ -z "${UPDATE_INTERVAL}" ]];then
