@@ -247,45 +247,49 @@ function delete_all_duplicated() {
   delete_duplicated nat POSTROUTING EGRESS_POST
   delete_duplicated nat EGRESS_POST "*"
 
-  iptables -t mangle -nL FORWARD | awk '/EGRESS_FWD_/{print $1}' \
+  iptables -t mangle -nL FORWARD 2>/dev/null | awk '/EGRESS_FWD_/{print $1}' \
   | while read chain;do
     delete_duplicated mangle "${chain}" "*"
   done
 
-  iptables -t nat -nL POSTROUTING | awk '/EGRESS_POST_/{print $1}' \
+  iptables -t nat -nL EGRESS_POST 2>/dev/null | awk '/EGRESS_POST_/{print $1}' \
   | while read chain;do
     delete_duplicated nat "${chain}" "*"
   done
 }
 
-function delete() {
-  unset PODIP_VIP_MAPPINGS
-  unset VIP_ROUTEID_MAPPINGS
-  declare -A PODIP_VIP_MAPPINGS
-  declare -A VIP_ROUTEID_MAPPINGS
-  reload_mappings
+function delete_all() {
+  log "Deleting all rules"
+  delete_all_duplicated
 
-  log "Deleting per Vip rules"
-  for VIP in "${!VIP_ROUTEID_MAPPINGS[@]}"; do
-    ROUTE_ID="${VIP_ROUTEID_MAPPINGS[$VIP]}"
-    ROUTE_TABLE="${ROUTE_TABLE_PREFIX}_${ROUTE_ID}"
-    EGRESS_FWD_CHAIN="EGRESS_FWD_${VIP}"
-    EGRESS_POST_CHAIN="EGRESS_POST_${VIP}"
+  # Delete per VIP iptables chains
+  iptables -t mangle -nL FORWARD 2>/dev/null | awk '/EGRESS_FWD_/{print $1}' \
+  | while read chain;do
+    destroy_delete_chain mangle FORWARD "${chain}"
+  done
 
-    log "Deleting rule for VIP ${VIP}"
-    destroy_delete_chain mangle FORWARD "${EGRESS_FWD_CHAIN}"
-    destroy_delete_chain nat EGRESS_POST "${EGRESS_POST_CHAIN}"
+  iptables -t nat -nL EGRESS_POST 2>/dev/null | awk '/EGRESS_POST_/{print $1}' \
+  | while read chain;do
+    destroy_delete_chain nat EGRESS_POST "${chain}"
+  done
 
+  # Delete common iptables chains
+  destroy_delete_chain nat POSTROUTING EGRESS_POST
+  destroy_delete_chain mangle PREROUTING EGRESS
+
+  # Delete all routing tables
+  ip rule show | awk '/egress_/{print $7}' \
+  | while read ROUTE_TABLE;do
     ip rule del table "${ROUTE_TABLE}" 2>/dev/null || true
     ip route flush table "${ROUTE_TABLE}" 2>/dev/null || true
-    rm -f "/etc/iproute2/rt_tables.d/${ROUTE_TABLE}.conf"
+  done
+
+  find /etc/iproute2/rt_tables.d/ -regex '/etc/iproute2/rt_tables.d/egress_[0-9]+.conf' \
+  | while read ROUTE_FILE;do
+    rm -f "${ROUTE_FILE}"
   done
 
   ip route flush cache
-
-  log "Deleting common rules"
-  destroy_delete_chain nat POSTROUTING EGRESS_POST
-  destroy_delete_chain mangle PREROUTING EGRESS
 }
 
 while true
@@ -333,10 +337,10 @@ done
 # Verify interface exists
 ip addr show "${INTERFACE}" >/dev/null
 
-trap "echo Stopping $NAME; if [ -n "${UPDATE_INTERVAL}" ];then delete; fi" SIGTERM SIGINT
+trap "echo Stopping $NAME; if [ -n "${UPDATE_INTERVAL}" ];then delete_all; fi" SIGTERM SIGINT
 
 if [ $DELETE == true ];then
-  delete
+  delete_all
   exit 0
 fi
 
