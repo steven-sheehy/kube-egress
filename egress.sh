@@ -49,11 +49,15 @@ EOF
 
 function reload_mappings() {
   while read config;do
-    PODIP_VIP_MAPPINGS["${config}"]=$(cat "${PODIP_VIP_MAPPING_DIR}/${config}")
+    if [ "${config}" != "" ];then
+      PODIP_VIP_MAPPINGS["${config}"]=$(cat "${PODIP_VIP_MAPPING_DIR}/${config}")
+    fi
   done <<< "$(ls ${PODIP_VIP_MAPPING_DIR})"
 
   while read config;do
-    VIP_ROUTEID_MAPPINGS["${config}"]=$(cat "${VIP_ROUTEID_MAPPING_DIR}/${config}")
+    if [ "${config}" != "" ];then
+      VIP_ROUTEID_MAPPINGS["${config}"]=$(cat "${VIP_ROUTEID_MAPPING_DIR}/${config}")
+    fi
   done <<< "$(ls ${VIP_ROUTEID_MAPPING_DIR})"
 }
 
@@ -69,15 +73,15 @@ function handle_chain() {
   local action=${3}
   local chain=${4}
 
-  if (iptables -t ${table} -nL ${chain} >/dev/null 2>&1);then
+  if (iptables -t "${table}" -nL "${chain}" >/dev/null 2>&1);then
     # Delete or flash chain only when there's existing chain
-    if [ ${action} == "-X" ] || [ ${action} == "-F" ];then
-      iptables -t ${table} ${action} ${chain} 2>/dev/null || true
+    if [ "${action}" == "-X" ] || [ "${action}" == "-F" ];then
+      iptables -t "${table}" "${action}" "${chain}" 2>/dev/null || true
     fi
   else
     # Create chain only when there's no existing chain
-    if [ ${action} == "-N" ];then
-      iptables -t ${table} ${action} ${chain} 2>/dev/null || true
+    if [ "${action}" == "-N" ];then
+      iptables -t "${table}" "${action}" "${chain}" 2>/dev/null || true
     fi
   fi
 }
@@ -89,15 +93,15 @@ function handle_rule() {
   local chain=${4}
   shift 4
 
-  if (iptables -t ${table} -C ${chain} $@ 2>/dev/null);then
+  if (iptables -t "${table}" -C "${chain}" $@ 2>/dev/null);then
     # Delete rule only when there's existing rule
     if [ ${action} == "-D" ];then
-      iptables -t ${table} ${action} ${chain} $@ 2>/dev/null || true
+      iptables -t "${table}" "${action}" "${chain}" $@ 2>/dev/null || true
     fi
   else
     # Add or insert rule only when there's no existing rule
-    if [ ${action} == "-A" ] || [ ${action} == "-I" ];then
-      iptables -t ${table} ${action} ${chain} $@ 2>/dev/null || true
+    if [ "${action}" == "-A" ] || [ "${action}" == "-I" ];then
+      iptables -t "${table}" "${action}" "${chain}" $@ 2>/dev/null || true
     fi
   fi
 }
@@ -211,20 +215,27 @@ function delete_duplicated() {
   local table=${1}
   local chain=${2}
   local filter="${3}"
-  local max_atempt=5
+  local attempt=0
+  local max_attempt=5
 
-  for atempt in $(seq ${max_atempt});do
-    count=0
+  while [ ${attempt} -lt ${max_attempt} ];do
+    local count=0
     while read rule;do
-      if [ "${filter}" = "*" ] || (echo "${rule}" | grep -Fq "${filter}");then
-        # Remove the duplicated rule by replacing the output of iptables -S
-        eval $(echo "${rule}" | sed "s/^-A/iptables -t ${table} -D/") 2>/dev/null || true
-        count=$((${count} + 1))
+      if [ "${rule}" != "" ];then
+        if [ "${filter}" = "*" ] || (echo "${rule}" | grep -Fq "${filter}");then
+          # Remove the duplicated rule by replacing the output of iptables -S
+          eval $(echo "${rule}" | sed "s/^-A/iptables -t ${table} -D/") 2>/dev/null || true
+          count=$((${count} + 1))
+        fi
       fi
-    done <<< $(iptables -t ${table} -S ${chain} 2>/dev/null | sort | uniq -d)
+    done <<< $(iptables -t "${table}" -S "${chain}" 2>/dev/null | sort | uniq -d)
 
+    # Check if there are any updates in this loop
     if [ ${count} -eq 0 ];then
-      break
+      # Break the loop (Trap doesn't work well with break, so update attempt count instead.)
+      attempt=${max_attempt}
+    else
+      attempt=$(( ${attempt} + 1 ))
     fi
   done
 }
@@ -236,13 +247,15 @@ function delete_all_duplicated() {
   delete_duplicated nat POSTROUTING EGRESS_POST
   delete_duplicated nat EGRESS_POST "*"
 
-  while read chain;do
+  iptables -t mangle -nL FORWARD | awk '/EGRESS_FWD_/{print $1}' \
+  | while read chain;do
     delete_duplicated mangle "${chain}" "*"
-  done <<< $(iptables -t mangle -nL FORWARD | awk '/EGRESS_FWD_/{print $1}')
+  done
 
-  while read chain;do
+  iptables -t nat -nL POSTROUTING | awk '/EGRESS_POST_/{print $1}' \
+  | while read chain;do
     delete_duplicated nat "${chain}" "*"
-  done <<< $(iptables -t nat -nL POSTROUTING | awk '/EGRESS_POST_/{print $1}')
+  done
 }
 
 function delete() {
