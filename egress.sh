@@ -102,6 +102,34 @@ function handle_rule() {
   fi
 }
 
+function create_add_chain() {
+  local table=${1}
+  local parent_chain=${2}
+  local child_chain=${3}
+
+  handle_chain -t "${table}" -N "${child_chain}"
+  handle_rule -t "${table}" -A "${parent_chain}" -j "${child_chain}"
+}
+
+function create_insert_chain() {
+  local table=${1}
+  local parent_chain=${2}
+  local child_chain=${3}
+
+  handle_chain -t "${table}" -N "${child_chain}"
+  handle_rule -t "${table}" -I "${parent_chain}" -j "${child_chain}"
+}
+
+function destroy_delete_chain() {
+  local table=${1}
+  local parent_chain=${2}
+  local child_chain=${3}
+
+  handle_rule -t "${table}" -D "${parent_chain}" -j "${child_chain}"
+  handle_chain -t "${table}" -F "${child_chain}"
+  handle_chain -t "${table}" -X "${child_chain}"
+}
+
 function apply() {
   unset PODIP_VIP_MAPPINGS
   unset VIP_ROUTEID_MAPPINGS
@@ -110,12 +138,10 @@ function apply() {
   reload_mappings
 
   log "Applying common iptables rules"
-  handle_chain -t mangle -N EGRESS
+  create_insert_chain nat POSTROUTING EGRESS_POST
+  create_add_chain mangle PREROUTING EGRESS
   handle_rule -t mangle -I EGRESS -d "${POD_SUBNET}" -j RETURN
   handle_rule -t mangle -I EGRESS -d "${SERVICE_SUBNET}" -j RETURN
-  handle_rule -t mangle -A PREROUTING -j EGRESS
-  handle_chain -t nat -N EGRESS_POST
-  handle_rule -t nat -I POSTROUTING -j EGRESS_POST
 
   unset configured_vips
   declare -A configured_vips
@@ -134,10 +160,8 @@ function apply() {
     # Check if VIP has already been configured in this loop
     if [[ -z "${configured_vips[$VIP]+unset}" ]]; then
       # Define and add chains for VIP
-      handle_chain -t mangle -N "${EGRESS_FWD_CHAIN}"
-      handle_rule -t mangle -A FORWARD -j "${EGRESS_FWD_CHAIN}"
-      handle_chain -t nat -N "${EGRESS_POST_CHAIN}"
-      handle_rule -t nat -I EGRESS_POST -j "${EGRESS_POST_CHAIN}"
+      create_add_chain mangle FORWARD "${EGRESS_FWD_CHAIN}"
+      create_insert_chain nat EGRESS_POST "${EGRESS_POST_CHAIN}"
       configured_vips["${VIP}"]=true
     else
       VIP_CONFIGURED=true
@@ -236,29 +260,19 @@ function delete() {
     EGRESS_POST_CHAIN="EGRESS_POST_${VIP}"
 
     log "Deleting rule for VIP ${VIP}"
-    handle_rule -t mangle -D FORWARD -j "${EGRESS_FWD_CHAIN}"
-    handle_chain -t mangle -F "${EGRESS_FWD_CHAIN}"
-    handle_chain -t mangle -X "${EGRESS_FWD_CHAIN}"
-
-    handle_rule -t nat -D EGRESS_POST -j "${EGRESS_POST_CHAIN}"
-    handle_chain -t nat -F "${EGRESS_POST_CHAIN}"
-    handle_chain -t nat -X "${EGRESS_POST_CHAIN}"
+    destroy_delete_chain mangle FORWARD "${EGRESS_FWD_CHAIN}"
+    destroy_delete_chain nat EGRESS_POST "${EGRESS_POST_CHAIN}"
 
     ip rule del table "${ROUTE_TABLE}" 2>/dev/null || true
     ip route flush table "${ROUTE_TABLE}" 2>/dev/null || true
     rm -f "/etc/iproute2/rt_tables.d/${ROUTE_TABLE}.conf"
-    handle_rule -t nat -D POSTROUTING -m mark --mark "${ROUTE_ID}/${ROUTE_ID_MASK}" -j ACCEPT
   done
 
   ip route flush cache
 
   log "Deleting common rules"
-  handle_rule -t nat -D POSTROUTING -j EGRESS_POST
-  handle_chain -t nat -F EGRESS_POST
-  handle_chain -t nat -X EGRESS_POST
-  handle_rule -t mangle -D PREROUTING -j EGRESS
-  handle_chain -t mangle -F EGRESS
-  handle_chain -t mangle -X EGRESS
+  destroy_delete_chain nat POSTROUTING EGRESS_POST
+  destroy_delete_chain mangle PREROUTING EGRESS
 }
 
 while true
