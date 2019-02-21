@@ -111,8 +111,8 @@ function apply() {
 
   log "Applying common iptables rules"
   handle_chain -t mangle -N EGRESS
-  handle_rule -t mangle -A EGRESS -d "${POD_SUBNET}" -j RETURN
-  handle_rule -t mangle -A EGRESS -d "${SERVICE_SUBNET}" -j RETURN
+  handle_rule -t mangle -I EGRESS -d "${POD_SUBNET}" -j RETURN
+  handle_rule -t mangle -I EGRESS -d "${SERVICE_SUBNET}" -j RETURN
   handle_rule -t mangle -A PREROUTING -j EGRESS
   handle_chain -t nat -N EGRESS_POST
   handle_rule -t nat -I POSTROUTING -j EGRESS_POST
@@ -181,6 +181,44 @@ function apply() {
   done
 
   ip route flush cache
+}
+
+function delete_duplicated() {
+  local table=${1}
+  local chain=${2}
+  local filter="${3}"
+  local max_atempt=5
+
+  for atempt in $(seq ${max_atempt});do
+    count=0
+    while read rule;do
+      if [ "${filter}" = "*" ] || (echo "${rule}" | grep -Fq "${filter}");then
+        # Remove the duplicated rule by replacing the output of iptables -S
+        eval $(echo "${rule}" | sed "s/^-A/iptables -t ${table} -D/") 2>/dev/null || true
+        count=$((${count} + 1))
+      fi
+    done <<< $(iptables -t ${table} -S ${chain} 2>/dev/null | sort | uniq -d)
+
+    if [ ${count} -eq 0 ];then
+      break
+    fi
+  done
+}
+
+function delete_all_duplicated() {
+  delete_duplicated mangle PREROUTING EGRESS
+  delete_duplicated mangle EGRESS "*"
+  delete_duplicated mangle FORWARD EGRESS_FWD
+  delete_duplicated nat POSTROUTING EGRESS_POST
+  delete_duplicated nat EGRESS_POST "*"
+
+  while read chain;do
+    delete_duplicated mangle "${chain}" "*"
+  done <<< $(iptables -t mangle -nL FORWARD | awk '/EGRESS_FWD_/{print $1}')
+
+  while read chain;do
+    delete_duplicated nat "${chain}" "*"
+  done <<< $(iptables -t nat -nL POSTROUTING | awk '/EGRESS_POST_/{print $1}')
 }
 
 function delete() {
@@ -276,6 +314,7 @@ if [ $DELETE == true ];then
 fi
 
 while :; do
+  delete_all_duplicated
   apply
 
   if [[ -z "${UPDATE_INTERVAL}" ]];then
