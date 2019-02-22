@@ -36,6 +36,25 @@ Then, update the `daemonset.yaml` with the options required and run it.
 kubectl apply -f daemonset.yaml
 ```
 
+Use egress_mgr.sh script to automatically update podip-vip-mappings configmap.
+This script reads Pod and VIP mappings from configuration file and check current
+PodIPs for the pods by using kubectl, then update configmap with the latest PodIP information.
+This will allow users to specify an egress IP per Pod basis, without caring about the current PodIP.
+
+```shell
+$ ./egress_mgr.sh --help
+Updates configmap for podip_vip_mapping by checking current pod ip and config file
+Usage:
+  egress_mgr.sh [options]
+
+Options:
+  -h, --help                 Displays the help text
+  -f, --file                 Config file to specify mappings for pod and vip. Default is ./config.txt
+  -n, --namespace            Namespace for configmap which stores mappings for pod ip and vip. Default is default
+  -m, --mapping-name         Name for configmap which stores mappings for pod ip and vip. Default is podip-vip-mappings
+  -u, --update-interval      How often to update configmap upon pod ip changes and config file changes. Default is empty for run once
+```
+
 ## Limitations
 - No ability to restrict by namespace
 - IP must already be routable to the nodes and appear as a virtual IP on exactly one of the nodes
