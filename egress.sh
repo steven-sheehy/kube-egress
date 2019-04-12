@@ -22,8 +22,8 @@ ROUTE_TABLE_PREFIX="egress"
 INTERFACE="eth0"
 POD_SUBNET="10.32.0.0/12"
 SERVICE_SUBNET="10.96.0.0/12"
-PODIP_VIP_MAPPING_DIR="config/podip_vip_mapping/"
-VIP_ROUTEID_MAPPING_DIR="config/vip_routeid_mapping/"
+PODIP_VIP_MAPPING_DIR="/etc/kube-egress/podip_vip_mapping/"
+VIP_ROUTEID_MAPPING_DIR="/etc/kube-egress/vip_routeid_mapping/"
 UPDATE_INTERVAL=
 DELETE=false
 

@@ -21,39 +21,34 @@ Options:
   -h, --help                 Displays the help text
   -i, --interface            The network interface to use. Default is eth0
   -p, --pod-subnet           The Kubernetes pod IP allocation range. Default is 10.32.0.0/12
-  -r, --vip-routeid-mappings The directory that contains mappings from VIP to route ID. Default is config/vip_routeid_mapping/
+  -r, --vip-routeid-mappings The directory that contains mappings from VIP to route ID. Default is /etc/kube-egress/vip_routeid_mapping/
   -s, --service-subnet       The Kubernetes service IP allocation range. Default is 10.96.0.0/12
   -u, --update-interval      How often to check to see if the rules need to be updated based upon VIP changes. Default is empty for run once
-  -v, --podip-vip-mappings   The directory that contains mappings from Pod IP to VIP. Default is config/podip_vip_mapping/
+  -v, --podip-vip-mappings   The directory that contains mappings from Pod IP to VIP. Default is /etc/kube-egress/podip_vip_mapping/
 ```
+
+Use either (1) or (2) below to manage mappings.
+
+### (1) Manually configure pod ip and VIP mappings
 
 Update the `podip_vip.yaml` and `vip_routeid.yaml` and create configMaps.
 Note that `podip_vip.yaml` defines key-value pairs, where key is a PodIP and value is a VIP,
 and `vip_routeid.yaml` defines key-value pairs, where key is VIP and value is route ID.
+(Route ID can be any unique value for each vip between 1 and 252. See man ip for details on range of this value.)
 Then, update the `daemonset.yaml` with the options required and run it.
 
 ```shell
 kubectl apply -f daemonset.yaml
 ```
 
-Use egress_mgr.sh script to automatically update podip-vip-mappings configmap.
-This script reads Pod and VIP mappings from configuration file and check current
-PodIPs for the pods by using kubectl, then update configmap with the latest PodIP information.
-This will allow users to specify an egress IP per Pod basis, without caring about the current PodIP.
+On pod ip changes, mappings needs to be changed manually by users.
 
-```shell
-$ ./egress_mgr.sh --help
-Updates configmap for podip_vip_mapping by checking current pod ip and config file
-Usage:
-  egress_mgr.sh [options]
+### (2) Use operator to automatically update pod ip and VIP mappings
 
-Options:
-  -h, --help                 Displays the help text
-  -f, --file                 Config file to specify mappings for pod and vip. Default is ./config.txt
-  -n, --namespace            Namespace for configmap which stores mappings for pod ip and vip. Default is default
-  -m, --mapping-name         Name for configmap which stores mappings for pod ip and vip. Default is podip-vip-mappings
-  -u, --update-interval      How often to update configmap upon pod ip changes and config file changes. Default is empty for run once
-```
+Use [egress-mapper](https://github.com/mkimuram/egress-mapper) operator to manage both kube-egress and keepalived-vip.
+Then update vip cr and egress cr to mangage pod ip and VIP mappings.
+
+On pod ip changes, the operator will automatically update mappings.
 
 ## Limitations
 - No ability to restrict by namespace
